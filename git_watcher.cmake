@@ -19,6 +19,10 @@
 #   -- The path to the file used to store the previous build's git state.
 #      Defaults to the current binary directory.
 #
+#   GIT_VERSION_TAG_FILE (OPTIONAL)
+#   -- The path to the file used to store the previous build's git version tag.
+#      Defaults to the current binary directory.
+#
 #   GIT_WORKING_DIR (OPTIONAL)
 #   -- The directory from which git commands will be run.
 #      Defaults to the directory with the top level CMakeLists.txt.
@@ -82,6 +86,7 @@ endmacro()
 CHECK_REQUIRED_VARIABLE(PRE_CONFIGURE_FILE)
 CHECK_REQUIRED_VARIABLE(POST_CONFIGURE_FILE)
 CHECK_OPTIONAL_VARIABLE(GIT_STATE_FILE "${CMAKE_BINARY_DIR}/git-state-hash")
+CHECK_OPTIONAL_VARIABLE(GIT_VERSION_TAG_FILE "${CMAKE_BINARY_DIR}/git-version-tag")
 CHECK_OPTIONAL_VARIABLE(GIT_WORKING_DIR "${CMAKE_SOURCE_DIR}")
 CHECK_OPTIONAL_VARIABLE_NOPATH(GIT_FAIL_IF_NONZERO_EXIT TRUE)
 CHECK_OPTIONAL_VARIABLE_NOPATH(GIT_IGNORE_UNTRACKED FALSE)
@@ -105,6 +110,8 @@ set(_state_variable_names
     GIT_COMMIT_BODY
     GIT_DESCRIBE
     GIT_BRANCH
+    GIT_TAG
+    GIT_TAG_VERSION
     # >>>
     # 1. Add the name of the additional git variable you're interested in monitoring
     #    to this list.
@@ -248,6 +255,45 @@ function(GetGitState _working_dir)
     #    the environment using the same variable name you added
     #    to the "_state_variable_names" list.
 
+    set(_permit_git_failure ON)
+    # RunGitCommand(describe --tags --dirty)
+    RunGitCommand(describe --tags)
+    unset(_permit_git_failure)
+    if(exit_code EQUAL 0)
+        set(ENV{GIT_TAG} "${output}")
+    else()
+        set(ENV{GIT_TAG} "") # empty string.
+        message(WARNING "No Tag specified!")
+    endif()
+
+    set(_permit_git_failure ON)
+    RunGitCommand(describe --tags --abbrev=0)
+    unset(_permit_git_failure)
+    if(exit_code EQUAL 0)
+        # A git tag beginning with 'v' or 'V' and a sematic version in 
+        # the PROJECT_VERSION format.
+        # See https://cmake.org/cmake/help/latest/command/project.html
+        # The end of the tag string will be ignored.
+        #    Possible tags     ->     PROJECT_VERSION:
+        #    - V1.2            ->     1.2
+        #    - v3.23.4         ->     3.23.5
+        #    - V3.23.4.766     ->     3.23.4.766
+        #    - v0              ->     0
+        #    - V5.3.2-rc3      ->     5.3.2
+        string(REGEX MATCH "^(v|V)[0-9]+([.][0-9]+)?([.][0-9]+)?([.][0-9]+)?.*" git_version_regex ${output})
+        if(git_version_regex STREQUAL "")
+            message(FATAL_ERROR "No valid version tag found, input tag: ${output}")
+        endif()
+
+        # Extract only the raw version e.g V5.3.2-rc3 -> 5.3.2
+        string(REGEX MATCH "[0-9]+([.][0-9]+)?([.][0-9]+)?([.][0-9]+)?" git_version_regex ${git_version_regex})
+
+        set(ENV{GIT_TAG_VERSION} "${git_version_regex}")
+    else()
+        set(ENV{GIT_TAG_VERSION} "") # empty string.
+        message(FATAL_ERROR "No Tag specified!")
+    endif()
+
 endfunction()
 
 
@@ -283,7 +329,7 @@ endfunction()
 # Args:
 #   _working_dir    (in)  string; the directory from which git commands will be ran.
 #   _state_changed (out)    bool; whether or no the state of the repo has changed.
-function(CheckGit _working_dir _state_changed)
+function(CheckGit _working_dir _state_changed _version_tag_changed)
 
     # Get the current state of the repo.
     GetGitState("${_working_dir}")
@@ -306,6 +352,8 @@ function(CheckGit _working_dir _state_changed)
         if(OLD_HEAD_CONTENTS STREQUAL "${state}")
             # State didn't change.
             set(${_state_changed} "false" PARENT_SCOPE)
+            # If state didnt changed, the git version tag didnt changed to
+            set(${_version_tag_changed} "false" PARENT_SCOPE)
             return()
         endif()
     endif()
@@ -315,6 +363,19 @@ function(CheckGit _working_dir _state_changed)
     # Future builds will compare their state to this file.
     file(WRITE "${GIT_STATE_FILE}" "${state}")
     set(${_state_changed} "true" PARENT_SCOPE)
+
+    # check if the git version tag has changed. First read the old
+    # version tag from disk (if exists), then update the file and
+    # check if the tag has changed
+    if(EXISTS "${GIT_VERSION_TAG_FILE}")
+        file(READ "${GIT_VERSION_TAG_FILE}" OLD_GIT_VERSION_TAG)
+    endif()
+    file(WRITE "${GIT_VERSION_TAG_FILE}" "$ENV{GIT_TAG_VERSION}")
+    if(OLD_GIT_VERSION_TAG STREQUAL "$ENV{GIT_TAG_VERSION}")
+        set(${_version_tag_changed} "false" PARENT_SCOPE)
+    else()
+        set(${_version_tag_changed} "true" PARENT_SCOPE)
+    endif()
 endfunction()
 
 
@@ -330,11 +391,13 @@ function(SetupGitMonitoring)
         BYPRODUCTS
             ${POST_CONFIGURE_FILE}
             ${GIT_STATE_FILE}
+            ${GIT_VERSION_TAG_FILE}
         COMMENT "Checking the git repository for changes..."
         COMMAND
             ${CMAKE_COMMAND}
             -D_BUILD_TIME_CHECK_GIT=TRUE
             -DGIT_WORKING_DIR=${GIT_WORKING_DIR}
+            -DCMAKE_CURRENT_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
             -DGIT_EXECUTABLE=${GIT_EXECUTABLE}
             -DGIT_STATE_FILE=${GIT_STATE_FILE}
             -DPRE_CONFIGURE_FILE=${PRE_CONFIGURE_FILE}
@@ -353,13 +416,20 @@ function(Main)
     if(_BUILD_TIME_CHECK_GIT)
         # Check if the repo has changed.
         # If so, run the change action.
-        CheckGit("${GIT_WORKING_DIR}" changed)
+        CheckGit("${GIT_WORKING_DIR}" changed git_version_tag_changed)
         if(changed OR NOT EXISTS "${POST_CONFIGURE_FILE}")
+            message(STATUS "Git state changed, update version info file: ${POST_CONFIGURE_FILE}")
             GitStateChangedAction()
+        endif()       
+        if(git_version_tag_changed)
+            message(STATUS "Git version tag changed, reconfigure cmake")
+            execute_process(COMMAND ${CMAKE_COMMAND} --build ${CMAKE_CURRENT_BINARY_DIR} --target rebuild_cache)
         endif()
     else()
         # >> Executes at configure time.
         SetupGitMonitoring()
+        CheckGit("${GIT_WORKING_DIR}" changed git_version_tag_changed)
+        GitStateChangedAction()
     endif()
 endfunction()
 
