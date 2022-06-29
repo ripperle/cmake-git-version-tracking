@@ -87,15 +87,6 @@ macro(CHECK_OPTIONAL_VARIABLE var_name default_value)
     PATH_TO_ABSOLUTE(${var_name})
 endmacro()
 
-CHECK_REQUIRED_VARIABLE(PRE_CONFIGURE_FILE)
-CHECK_REQUIRED_VARIABLE(POST_CONFIGURE_FILE)
-CHECK_OPTIONAL_VARIABLE(GIT_STATE_FILE "${CMAKE_BINARY_DIR}/git-state-hash")
-CHECK_OPTIONAL_VARIABLE(GIT_VERSION_TAG_FILE "${CMAKE_BINARY_DIR}/git-version-tag")
-CHECK_OPTIONAL_VARIABLE(GIT_WORKING_DIR "${CMAKE_SOURCE_DIR}")
-CHECK_OPTIONAL_VARIABLE_NOPATH(GIT_FAIL_IF_NONZERO_EXIT TRUE)
-CHECK_OPTIONAL_VARIABLE_NOPATH(GIT_IGNORE_UNTRACKED FALSE)
-CHECK_OPTIONAL_VARIABLE_NOPATH(GIT_VERSION_TAG_REQUIRED FALSE)
-
 # Check the optional git variable.
 # If it's not set, we'll try to find it using the CMake packaging system.
 if(NOT DEFINED GIT_EXECUTABLE)
@@ -400,25 +391,30 @@ endfunction()
 #              check the state of git before every build. If the state has
 #              changed, then a file is configured.
 function(SetupGitMonitoring)
-    add_custom_target(check_git
+    HashGitState(state)
+    message(STATUS "Setup custom command check_git_${state} for [${GIT_WORKING_DIR}]")
+    add_custom_target(check_git_${state}
         ALL
         DEPENDS ${PRE_CONFIGURE_FILE}
         BYPRODUCTS
             ${POST_CONFIGURE_FILE}
             ${GIT_STATE_FILE}
             ${GIT_VERSION_TAG_FILE}
-        COMMENT "Checking the git repository for changes..."
+        COMMENT "Checking the git repository [${GIT_WORKING_DIR}] for changes..."
         COMMAND
             ${CMAKE_COMMAND}
             -D_BUILD_TIME_CHECK_GIT=TRUE
             -DGIT_WORKING_DIR=${GIT_WORKING_DIR}
+            -D_CMAKE_BINARY_DIR=${CMAKE_BINARY_DIR} # override of CMAKE_BINARY_DIR dont work?!
             -DCMAKE_CURRENT_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
             -DGIT_EXECUTABLE=${GIT_EXECUTABLE}
             -DGIT_STATE_FILE=${GIT_STATE_FILE}
+            -DGIT_VERSION_TAG_FILE=${GIT_VERSION_TAG_FILE}
             -DPRE_CONFIGURE_FILE=${PRE_CONFIGURE_FILE}
             -DPOST_CONFIGURE_FILE=${POST_CONFIGURE_FILE}
             -DGIT_FAIL_IF_NONZERO_EXIT=${GIT_FAIL_IF_NONZERO_EXIT}
             -DGIT_IGNORE_UNTRACKED=${GIT_IGNORE_UNTRACKED}
+            -DGIT_VERSION_TAG_REQUIRED=${GIT_VERSION_TAG_REQUIRED}
             -P "${CMAKE_CURRENT_LIST_FILE}")
 endfunction()
 
@@ -438,13 +434,22 @@ function(Main)
         endif()       
         if(git_version_tag_changed)
             message(STATUS "Git version tag changed, reconfigure cmake")
-            execute_process(COMMAND ${CMAKE_COMMAND} --build ${CMAKE_CURRENT_BINARY_DIR} --target rebuild_cache)
+            execute_process(COMMAND ${CMAKE_COMMAND} --build ${_CMAKE_BINARY_DIR} --target rebuild_cache)
         endif()
     else()
         # >> Executes at configure time.
-        SetupGitMonitoring()
+        CHECK_REQUIRED_VARIABLE(PRE_CONFIGURE_FILE)
+        CHECK_REQUIRED_VARIABLE(POST_CONFIGURE_FILE)
+        CHECK_OPTIONAL_VARIABLE(GIT_STATE_FILE "${CMAKE_CURRENT_BINARY_DIR}/git-state-hash")
+        CHECK_OPTIONAL_VARIABLE(GIT_VERSION_TAG_FILE "${CMAKE_CURRENT_BINARY_DIR}/git-version-tag")
+        CHECK_OPTIONAL_VARIABLE(GIT_WORKING_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+        CHECK_OPTIONAL_VARIABLE_NOPATH(GIT_FAIL_IF_NONZERO_EXIT TRUE)
+        CHECK_OPTIONAL_VARIABLE_NOPATH(GIT_IGNORE_UNTRACKED FALSE)
+        CHECK_OPTIONAL_VARIABLE_NOPATH(GIT_VERSION_TAG_REQUIRED FALSE)
+
         CheckGit("${GIT_WORKING_DIR}" changed git_version_tag_changed)
         GitStateChangedAction()
+        SetupGitMonitoring()
     endif()
 endfunction()
 
