@@ -40,6 +40,10 @@
 #   -- Ignore the presence of untracked files when detecting if the
 #      working tree is dirty. This is set to FALSE by default.
 #
+#   GIT_VERSION_TAG_REQUIRED (OPTIONAL)
+#   -- If this is set to TRUE (default FALSE) the git watcher will exit with
+#      a fatal error if no valid git version tag is present.
+#
 # DESIGN
 #   - This script was designed similar to a Python application
 #     with a Main() function. I wanted to keep it compact to
@@ -90,6 +94,7 @@ CHECK_OPTIONAL_VARIABLE(GIT_VERSION_TAG_FILE "${CMAKE_BINARY_DIR}/git-version-ta
 CHECK_OPTIONAL_VARIABLE(GIT_WORKING_DIR "${CMAKE_SOURCE_DIR}")
 CHECK_OPTIONAL_VARIABLE_NOPATH(GIT_FAIL_IF_NONZERO_EXIT TRUE)
 CHECK_OPTIONAL_VARIABLE_NOPATH(GIT_IGNORE_UNTRACKED FALSE)
+CHECK_OPTIONAL_VARIABLE_NOPATH(GIT_VERSION_TAG_REQUIRED FALSE)
 
 # Check the optional git variable.
 # If it's not set, we'll try to find it using the CMake packaging system.
@@ -256,14 +261,12 @@ function(GetGitState _working_dir)
     #    to the "_state_variable_names" list.
 
     set(_permit_git_failure ON)
-    # RunGitCommand(describe --tags --dirty)
     RunGitCommand(describe --tags)
     unset(_permit_git_failure)
     if(exit_code EQUAL 0)
         set(ENV{GIT_TAG} "${output}")
     else()
-        set(ENV{GIT_TAG} "") # empty string.
-        message(WARNING "No Tag specified!")
+        set(ENV{GIT_TAG} "")
     endif()
 
     set(_permit_git_failure ON)
@@ -280,18 +283,30 @@ function(GetGitState _working_dir)
         #    - V3.23.4.766     ->     3.23.4.766
         #    - v0              ->     0
         #    - V5.3.2-rc3      ->     5.3.2
-        string(REGEX MATCH "^(v|V)[0-9]+([.][0-9]+)?([.][0-9]+)?([.][0-9]+)?.*" git_version_regex ${output})
+        string(REGEX MATCH "^(v|V)[0-9]+([.][0-9]+)?([.][0-9]+)?([.][0-9]+)?.*" 
+            git_version_regex 
+            ${output}
+        )
         if(git_version_regex STREQUAL "")
-            message(FATAL_ERROR "No valid version tag found, input tag: ${output}")
+            if(GIT_VERSION_TAG_REQUIRED)
+                message(FATAL_ERROR "No valid version tag found, input tag: ${output}")
+            else()
+                set(ENV{GIT_TAG_VERSION} "")
+            endif()
+        else()
+            # Extract only the raw version part of the tag, e.g V5.3.2-rc3 -> 5.3.2
+            string(REGEX MATCH "[0-9]+([.][0-9]+)?([.][0-9]+)?([.][0-9]+)?"
+                git_version_regex
+                ${git_version_regex}
+            )
+            set(ENV{GIT_TAG_VERSION} "${git_version_regex}")
         endif()
-
-        # Extract only the raw version e.g V5.3.2-rc3 -> 5.3.2
-        string(REGEX MATCH "[0-9]+([.][0-9]+)?([.][0-9]+)?([.][0-9]+)?" git_version_regex ${git_version_regex})
-
-        set(ENV{GIT_TAG_VERSION} "${git_version_regex}")
     else()
-        set(ENV{GIT_TAG_VERSION} "") # empty string.
-        message(FATAL_ERROR "No Tag specified!")
+        if(GIT_VERSION_TAG_REQUIRED)
+            message(FATAL_ERROR "No git tag specified!")
+        else()
+            set(ENV{GIT_TAG_VERSION} "")
+        endif()
     endif()
 
 endfunction()
